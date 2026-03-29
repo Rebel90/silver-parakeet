@@ -4,7 +4,8 @@ const API_BASE = import.meta.env.VITE_API_BASE || '';
  * Generic fetch wrapper with error handling.
  */
 async function apiFetch(endpoint, options = {}) {
-  const url = `${API_BASE}${endpoint}`;
+  // Ensure we don't double-prepend if endpoint already has a protocol
+  const url = endpoint.startsWith('http') ? endpoint : `${API_BASE}${endpoint}`;
   const config = {
     headers: { 'Content-Type': 'application/json' },
     ...options
