@@ -12,8 +12,8 @@ const {
   clearAllSendHistory
 } = require('../db/database');
 const { createDraftOrder } = require('../services/shopifyDraftOrder');
-const { sendInvoice } = require('../services/shopifyInvoice');
 const { completeDraftOrder } = require('../services/shopifyCompleteDraft');
+const { API_VERSION } = require('../services/shopifyAuth');
 const logger = require('../utils/logger');
 
 const MAX_RETRIES = 3;
@@ -22,6 +22,49 @@ const ROW_DELAY = 3000;         // 3s between rows (dev stores have low rate lim
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Verify the order was created with correct email and payment status.
+ * If order is PAID + has email → Shopify WILL send Order Confirmation email.
+ */
+async function verifyOrderEmail(shopDomain, accessToken, orderId, expectedEmail) {
+  try {
+    const cleanDomain = shopDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const url = `https://${cleanDomain}/admin/api/${API_VERSION}/orders/${orderId}.json?fields=id,email,financial_status,confirmed,contact_email`;
+
+    const response = await fetch(url, {
+      headers: { 'X-Shopify-Access-Token': accessToken, 'Content-Type': 'application/json' }
+    });
+
+    if (!response.ok) {
+      logger.error('verifyOrder', `Cannot verify order #${orderId}: ${response.status}`);
+      return;
+    }
+
+    const data = await response.json();
+    const order = data.order;
+
+    logger.info(`=== ORDER VERIFICATION #${orderId} ===`);
+    logger.info(`Email on order: ${order.email || 'MISSING!'}`);
+    logger.info(`Contact email: ${order.contact_email || 'MISSING!'}`);
+    logger.info(`Financial status: ${order.financial_status}`);
+    logger.info(`Confirmed: ${order.confirmed}`);
+
+    if (!order.email) {
+      logger.error('verifyOrder', `WARNING: Order #${orderId} has NO email! Notification will NOT be sent.`);
+    }
+
+    if (order.financial_status !== 'paid') {
+      logger.error('verifyOrder', `WARNING: Order #${orderId} is "${order.financial_status}" — not "paid". Email may not trigger.`);
+    }
+
+    if (order.email && order.financial_status === 'paid') {
+      logger.info(`Email CONFIRMED: Shopify will send Order Confirmation to ${order.email}`);
+    }
+  } catch (err) {
+    logger.error('verifyOrder', `Verification failed: ${err.message}`);
+  }
 }
 
 /**
@@ -278,23 +321,9 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
         draftOrderId = draftOrder.id;
         logger.info(`Step 1 OK: Draft #${draftOrderId}`);
 
-        // ═══ STEP 2: Send Invoice (Shopify email — guaranteed delivery) ═══
-        try {
-          await sendInvoice(
-            store.shop_domain,
-            store.access_token,
-            draftOrderId,
-            row,
-            'Order Confirmation - {product_name}',
-            'Hi {first_name}, your order has been confirmed. Thank you for your purchase!'
-          );
-          logger.info(`Step 2 OK: Invoice sent to ${row.email}`);
-        } catch (invoiceErr) {
-          // Invoice send failed — log but don't stop (Step 3 will also trigger email)
-          logger.error('sendInvoice', `Invoice failed for ${row.email} (non-critical): ${invoiceErr.message}`);
-        }
-
-        // ═══ STEP 3: Complete Draft Order (marks PAID → triggers Order Confirmation) ═══
+        // ═══ STEP 2: Complete Draft Order ═══
+        // payment_pending=false in URL query param → marks PAID
+        // Shopify auto-triggers "Order Confirmation" email
         const completed = await completeDraftOrder(
           store.shop_domain,
           store.access_token,
@@ -302,7 +331,10 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
           row.email
         );
         realOrderId = completed.order_id;
-        logger.info(`Step 3 OK: Completed -> Order #${realOrderId}`);
+        logger.info(`Step 2 OK: Completed -> Order #${realOrderId}`);
+
+        // ═══ STEP 3: Verify order was created correctly ═══
+        await verifyOrderEmail(store.shop_domain, store.access_token, realOrderId, row.email);
 
         status = 'Completed';
         success = true;

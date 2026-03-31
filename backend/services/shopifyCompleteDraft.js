@@ -4,56 +4,63 @@ const logger = require('../utils/logger');
 
 /**
  * Complete a Draft Order via Shopify REST API.
- * This converts the draft into a real Order.
+ * This converts the draft into a real paid Order.
  *
- * PUT /admin/api/{version}/draft_orders/{draft_order_id}/complete.json
+ * CRITICAL: payment_pending MUST be in the URL as query parameter!
+ * Shopify docs: PUT /draft_orders/{id}/complete.json?payment_pending=false
+ * Sending in body is silently ignored by Shopify.
  *
- * payment_pending in BODY:
- * - false → Marks as PAID (may hit dev store payment processor limit)
- * - true  → Marks as PENDING (works on dev stores, no processor needed)
- *
- * For dev stores: payment_pending=true avoids 422 errors
- * For paid stores: payment_pending=false marks as fully paid
+ * payment_pending=false → Order marked PAID → triggers Order Confirmation email
+ * payment_pending=true  → Order marked PENDING → NO email sent (default!)
  */
 async function completeDraftOrder(shopDomain, accessToken, draftOrderId, email) {
 
   if (!draftOrderId) throw new Error('draftOrderId is missing');
   if (!accessToken) throw new Error('accessToken is missing');
 
-  // Wait 2000ms before completing (avoid rate limits on dev stores)
+  // Wait 2s to let Shopify process the draft order
   await new Promise(resolve => setTimeout(resolve, 2000));
 
   const cleanDomain = shopDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
 
-  const url = `https://${cleanDomain}/admin/api/${API_VERSION}/draft_orders/${draftOrderId}/complete.json`;
+  // CRITICAL FIX: payment_pending=false as QUERY PARAMETER (not body!)
+  // This is the ONLY way Shopify reads this parameter
+  const url = `https://${cleanDomain}/admin/api/${API_VERSION}/draft_orders/${draftOrderId}/complete.json?payment_pending=false`;
 
   logger.info(`=== completeDraftOrder ===`);
   logger.info(`URL: ${url}`);
   logger.info(`Draft Order ID: ${draftOrderId}`);
   logger.info(`Customer Email: ${email}`);
+  logger.info(`payment_pending: false (in URL query param)`);
 
-  // Try with payment_pending: false first (paid stores)
-  // If it fails with 422, retry with payment_pending: true (dev stores)
-  let paymentPending = false;
-  let response = await makeCompleteRequest(url, accessToken, paymentPending);
+  let response = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Access-Token': accessToken
+    }
+  });
 
-  // If 422 (dev store payment limit), retry with payment_pending: true
+  // If 422 (dev store payment limit), retry with payment_pending=true
   if (response.status === 422) {
     const errText = await response.text();
-    logger.info(`payment_pending:false failed (422). Retrying with payment_pending:true for dev store...`);
+    logger.info(`payment_pending=false failed (422). Retrying with payment_pending=true...`);
     logger.info(`422 Response: ${errText}`);
 
-    // Wait before retry
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    paymentPending = true;
-    response = await makeCompleteRequest(url, accessToken, paymentPending);
+    const fallbackUrl = `https://${cleanDomain}/admin/api/${API_VERSION}/draft_orders/${draftOrderId}/complete.json?payment_pending=true`;
+    response = await fetch(fallbackUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': accessToken
+      }
+    });
   }
 
   const responseText = await response.text();
-
-  logger.info(`Status: ${response.status}`);
-  logger.info(`payment_pending: ${paymentPending}`);
+  logger.info(`Response Status: ${response.status}`);
 
   if (response.status === 429) {
     logger.error('completeDraftOrder', `Rate limited for ${email}`, { status: 429 });
@@ -65,7 +72,7 @@ async function completeDraftOrder(shopDomain, accessToken, draftOrderId, email) 
   if (!response.ok) {
     logger.error('completeDraftOrder', `Complete failed for ${email}`, {
       status: response.status,
-      response: responseText.slice(0, 300)
+      response: responseText.slice(0, 500)
     });
     throw new Error(`Complete order failed ${response.status}: ${responseText}`);
   }
@@ -74,38 +81,24 @@ async function completeDraftOrder(shopDomain, accessToken, draftOrderId, email) 
   try {
     data = JSON.parse(responseText);
   } catch {
-    throw new Error('Invalid JSON response: ' + responseText);
+    throw new Error('Invalid JSON from Shopify: ' + responseText.slice(0, 200));
   }
 
   if (!data?.draft_order?.order_id) {
-    logger.error('completeDraftOrder', `Order not created for ${email}`, { response: data });
-    throw new Error('Order not created: ' + responseText);
+    logger.error('completeDraftOrder', `No order_id for ${email}`, { response: data });
+    throw new Error('Order not created: ' + JSON.stringify(data).slice(0, 200));
   }
 
   const completedOrder = data.draft_order;
+  const orderStatus = completedOrder.status;
 
-  logger.info(`=== SUCCESS ===`);
+  logger.info(`=== ORDER CREATED ===`);
   logger.info(`Order ID: ${completedOrder.order_id}`);
-  logger.info(`Payment: ${paymentPending ? 'PENDING' : 'PAID'}`);
+  logger.info(`Draft Status: ${orderStatus}`);
   logger.info(`Email: ${email}`);
+  logger.info(`Order Confirmation email should be triggered by Shopify automatically`);
 
   return completedOrder;
-}
-
-/**
- * Make the PUT request to complete the draft order.
- */
-async function makeCompleteRequest(url, accessToken, paymentPending) {
-  return fetch(url, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Shopify-Access-Token': accessToken
-    },
-    body: JSON.stringify({
-      payment_pending: paymentPending
-    })
-  });
 }
 
 module.exports = { completeDraftOrder };
