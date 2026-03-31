@@ -11,7 +11,7 @@ const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 const ALGORITHM = 'aes-256-cbc';
 const IV_LENGTH = 16; 
 
-// Initialize database schema (matching existing shopify_app.db)
+// Initialize database schema
 db.exec(`
   CREATE TABLE IF NOT EXISTS stores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,6 +24,42 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now'))
   )
 `);
+
+// TASK 1 — send_progress table for resume feature
+db.exec(`
+  CREATE TABLE IF NOT EXISTS send_progress (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    shop_domain TEXT NOT NULL,
+    email TEXT NOT NULL,
+    row_index INTEGER NOT NULL,
+    status TEXT DEFAULT 'pending',
+    order_id TEXT,
+    draft_order_id TEXT,
+    error_message TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  )
+`);
+
+// Create index for fast lookups by session_id
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_send_progress_session 
+  ON send_progress(session_id)
+`);
+
+// TASK 7 — Clear old sessions on startup (older than 7 days)
+function clearOldSessions() {
+  const result = db.prepare(
+    `DELETE FROM send_progress WHERE created_at < datetime('now', '-7 days')`
+  ).run();
+  if (result.changes > 0) {
+    console.log(`[DB] Cleared ${result.changes} old session rows (>7 days)`);
+  }
+}
+
+// Run cleanup on startup
+clearOldSessions();
 
 /**
  * Encrypts an access token
@@ -63,7 +99,7 @@ function decrypt(encryptedText, ivHex) {
   }
 }
 
-// --- Database Operations ---
+// --- Store Operations ---
 
 function addStore(api_name, shop_domain, access_token, max_orders = 100) {
   const { iv, encrypted } = encrypt(access_token);
@@ -123,6 +159,124 @@ function resetAllUsage() {
   return db.prepare('UPDATE stores SET usage_count = 0').run();
 }
 
+// --- Send Progress Operations (RESUME FEATURE) ---
+
+/**
+ * TASK 2 — Generate a unique session ID for a CSV batch.
+ * Same CSV on same day = same session_id (enables resume detection).
+ */
+function generateSessionId(rows, shopDomain) {
+  const firstEmail = rows[0]?.email || '';
+  const lastEmail = rows[rows.length - 1]?.email || '';
+  const count = rows.length;
+  const date = new Date().toDateString();
+
+  const raw = `${firstEmail}-${lastEmail}-${count}-${shopDomain}-${date}`;
+
+  // Simple hash
+  let hash = 0;
+  for (let i = 0; i < raw.length; i++) {
+    hash = ((hash << 5) - hash) + raw.charCodeAt(i);
+    hash = hash & hash;
+  }
+
+  return `session_${Math.abs(hash)}`;
+}
+
+/**
+ * TASK 3 — Check if a session already has progress (resume detection).
+ */
+function checkExistingProgress(sessionId) {
+  const existingRows = db.prepare(
+    `SELECT * FROM send_progress WHERE session_id = ? ORDER BY row_index ASC`
+  ).all(sessionId);
+
+  if (existingRows.length === 0) {
+    return {
+      isResume: false,
+      alreadySent: [],
+      lastSentIndex: -1,
+      totalSentSoFar: 0,
+      totalFailed: 0,
+      rows: []
+    };
+  }
+
+  const alreadySent = existingRows
+    .filter(r => r.status === 'sent')
+    .map(r => r.row_index);
+
+  const failedRows = existingRows
+    .filter(r => r.status === 'failed')
+    .map(r => r.row_index);
+
+  const lastSentIndex = alreadySent.length > 0
+    ? Math.max(...alreadySent)
+    : -1;
+
+  return {
+    isResume: true,
+    alreadySent,
+    failedRows,
+    lastSentIndex,
+    totalSentSoFar: alreadySent.length,
+    totalFailed: failedRows.length,
+    rows: existingRows
+  };
+}
+
+/**
+ * Save all rows as "pending" for a fresh session.
+ */
+function initSessionRows(sessionId, shopDomain, rows) {
+  const stmt = db.prepare(
+    `INSERT INTO send_progress (session_id, shop_domain, email, row_index, status)
+     VALUES (?, ?, ?, ?, 'pending')`
+  );
+
+  const insertMany = db.transaction((rows) => {
+    for (let i = 0; i < rows.length; i++) {
+      stmt.run(sessionId, shopDomain, rows[i].email, i);
+    }
+  });
+
+  insertMany(rows);
+}
+
+/**
+ * Update a row's status after send attempt.
+ */
+function updateRowProgress(sessionId, rowIndex, status, orderId, draftOrderId, errorMessage) {
+  db.prepare(
+    `UPDATE send_progress 
+     SET status = ?, order_id = ?, draft_order_id = ?, error_message = ?, updated_at = datetime('now')
+     WHERE session_id = ? AND row_index = ?`
+  ).run(status, orderId || null, draftOrderId || null, errorMessage || null, sessionId, rowIndex);
+}
+
+/**
+ * Delete all progress for a session (Start Fresh).
+ */
+function deleteSession(sessionId) {
+  return db.prepare('DELETE FROM send_progress WHERE session_id = ?').run(sessionId);
+}
+
+/**
+ * Clear ALL send progress history.
+ */
+function clearAllSendHistory() {
+  return db.prepare('DELETE FROM send_progress').run();
+}
+
+/**
+ * Get progress details for a specific row in a session.
+ */
+function getRowProgress(sessionId, rowIndex) {
+  return db.prepare(
+    `SELECT * FROM send_progress WHERE session_id = ? AND row_index = ?`
+  ).get(sessionId, rowIndex);
+}
+
 module.exports = {
   addStore,
   getAllStores,
@@ -130,5 +284,14 @@ module.exports = {
   deleteStoreByDomain,
   deleteAllStores,
   incrementUsage,
-  resetAllUsage
+  resetAllUsage,
+  // Resume feature exports
+  generateSessionId,
+  checkExistingProgress,
+  initSessionRows,
+  updateRowProgress,
+  deleteSession,
+  clearAllSendHistory,
+  clearOldSessions,
+  getRowProgress
 };

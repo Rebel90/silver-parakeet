@@ -1,14 +1,26 @@
 import React from 'react';
 import { Box, InlineStack, Text } from '@shopify/polaris';
 
-export default function ProgressBar({ current, total, label }) {
+export default function ProgressBar({ current, total, alreadySent, label }) {
   const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+  const remaining = total - current;
+
+  // Build label
+  let displayLabel = label;
+  if (!displayLabel) {
+    if (alreadySent > 0) {
+      const newlySent = current - alreadySent;
+      displayLabel = `Sending ${current} of ${total} — (${alreadySent} already sent, ${newlySent >= 0 ? newlySent : 0} newly sent, ${remaining} remaining)`;
+    } else {
+      displayLabel = `${current} of ${total} orders processed`;
+    }
+  }
 
   return (
     <Box paddingBlockStart="400" paddingBlockEnd="400">
       <InlineStack align="space-between">
         <Text variant="bodySm" as="span" tone="subdued">
-          {label || `${current} of ${total} invoices sent`}
+          {displayLabel}
         </Text>
         <Text variant="bodySm" as="span" fontWeight="semibold">
           {percent}%

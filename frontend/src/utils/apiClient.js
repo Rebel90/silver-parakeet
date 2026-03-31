@@ -4,7 +4,6 @@ const API_BASE = import.meta.env.VITE_API_BASE || '';
  * Generic fetch wrapper with error handling.
  */
 async function apiFetch(endpoint, options = {}) {
-  // Ensure we don't double-prepend if endpoint already has a protocol
   const url = endpoint.startsWith('http') ? endpoint : `${API_BASE}${endpoint}`;
   const config = {
     headers: { 'Content-Type': 'application/json' },
@@ -14,7 +13,9 @@ async function apiFetch(endpoint, options = {}) {
   const response = await fetch(url, config);
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(errorData.error || `Request failed with status ${response.status}`);
+    const err = new Error(errorData.error || `Request failed with status ${response.status}`);
+    if (errorData.scope_error) err.scopeError = true;
+    throw err;
   }
   return response.json();
 }
@@ -92,26 +93,55 @@ export function clearLogs() {
   return apiFetch('/api/logs', { method: 'DELETE' });
 }
 
-/* ─── Invoice API (SSE) ─── */
+/* ─── Resume Feature APIs ─── */
 
-export function sendBulkInvoices(rows, subject, customMessage, shopDomain, onEvent) {
+/**
+ * Check if a CSV batch has previous progress (resume detection).
+ */
+export function checkSendProgress(rows, shopDomain) {
+  return apiFetch('/api/invoice/check-progress', {
+    method: 'POST',
+    body: JSON.stringify({ rows, shop_domain: shopDomain })
+  });
+}
+
+/**
+ * Delete a session to start fresh.
+ */
+export function deleteSessionProgress(sessionId) {
+  return apiFetch('/api/invoice/delete-session', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionId })
+  });
+}
+
+/**
+ * Clear ALL send history.
+ */
+export function clearSendHistory() {
+  return apiFetch('/api/invoice/clear-history', { method: 'DELETE' });
+}
+
+/* ─── Invoice API (SSE) with Resume Support ─── */
+
+export function sendBulkInvoices(rows, subject, customMessage, shopDomain, onEvent, options = {}) {
+  const { sessionId, mode } = options;
+
   return new Promise((resolve, reject) => {
     fetch(`${API_BASE}/api/invoice/send-bulk`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         rows,
-        subject,
-        custom_message: customMessage,
-        shop_domain: shopDomain
+        shop_domain: shopDomain,
+        session_id: sessionId || undefined,
+        mode: mode || undefined
       })
     }).then(response => {
       if (!response.ok) {
         return response.json().then(data => {
           const err = new Error(data.error || 'Bulk send failed');
-          if (data.scope_error) {
-            err.scopeError = true;
-          }
+          if (data.scope_error) err.scopeError = true;
           reject(err);
         });
       }
