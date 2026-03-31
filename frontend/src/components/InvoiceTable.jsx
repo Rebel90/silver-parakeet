@@ -2,12 +2,10 @@ import React, { useState } from 'react';
 import {
   Card,
   DataTable,
-  TextField,
   Button,
   Banner,
   InlineStack,
   Text,
-  Box,
   BlockStack,
   Divider
 } from '@shopify/polaris';
@@ -17,14 +15,11 @@ import { sendBulkInvoices } from '../utils/apiClient';
 import { exportFailedRows } from '../utils/csvParser';
 
 export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeError }) {
-  const [subject, setSubject] = useState('Your Order Invoice - {product_name}');
-  const [customMessage, setCustomMessage] = useState(
-    'Dear {first_name}, please find your order invoice attached.'
-  );
   const [sending, setSending] = useState(false);
   const [statuses, setStatuses] = useState(
     rows.map(() => 'Pending')
   );
+  const [orderIds, setOrderIds] = useState({});
   const [errors, setErrors] = useState({});
   const [progress, setProgress] = useState({ current: 0, total: rows.length });
   const [summary, setSummary] = useState(null);
@@ -38,12 +33,17 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
     setSending(true);
     setSummary(null);
     setErrors({});
+    setOrderIds({});
     setStatuses(rows.map(() => 'Pending'));
     setProgress({ current: 0, total: rows.length });
 
     try {
-      await sendBulkInvoices(rows, subject, customMessage, shopDomain, (event) => {
+      await sendBulkInvoices(rows, '', '', shopDomain, (event) => {
         switch (event.type) {
+          case 'start':
+            // Store info logged
+            break;
+
           case 'progress':
             setStatuses(prev => {
               const next = [...prev];
@@ -58,6 +58,9 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
               next[event.index] = event.status;
               return next;
             });
+            if (event.order_id) {
+              setOrderIds(prev => ({ ...prev, [event.index]: event.order_id }));
+            }
             if (event.error) {
               setErrors(prev => ({ ...prev, [event.index]: event.error }));
             }
@@ -122,7 +125,7 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
     setProgress({ current: 0, total: failedRows.length });
 
     try {
-      await sendBulkInvoices(failedRows, subject, customMessage, shopDomain, (event) => {
+      await sendBulkInvoices(failedRows, '', '', shopDomain, (event) => {
         const actualIndex = failedIndices[event.index];
 
         switch (event.type) {
@@ -134,6 +137,9 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
               return next;
             });
             if (event.type === 'result') {
+              if (event.order_id) {
+                setOrderIds(prev => ({ ...prev, [actualIndex]: event.order_id }));
+              }
               if (event.error) {
                 setErrors(prev => ({ ...prev, [actualIndex]: event.error }));
               }
@@ -166,7 +172,7 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
   const handleExportFailed = () => {
     const failedRows = rows
       .filter((_, i) => statuses[i] && statuses[i].startsWith('Failed'))
-      .map((row, i) => ({
+      .map((row) => ({
         ...row,
         status: statuses[rows.indexOf(row)],
         error: errors[rows.indexOf(row)] || ''
@@ -184,9 +190,16 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
     `$${row.product_price}`,
     <div key={i}>
       <StatusBadge status={statuses[i]} />
+      {/* Show Order ID for completed rows */}
+      {orderIds[i] && (
+        <div style={{ fontSize: '11px', color: '#1a7f37', marginTop: '4px' }}>
+          ✅ Order #{orderIds[i]} — Email sent to: {row.email}
+        </div>
+      )}
+      {/* Show error for failed rows */}
       {errors[i] && (
-        <div style={{ fontSize: '11px', color: '#d72c0d', marginTop: '4px', maxWidth: '220px', wordBreak: 'break-word' }}>
-          {errors[i]}
+        <div style={{ fontSize: '11px', color: '#d72c0d', marginTop: '4px', maxWidth: '260px', wordBreak: 'break-word' }}>
+          ❌ {errors[i]}
         </div>
       )}
     </div>
@@ -199,9 +212,8 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
     <Card>
       <BlockStack gap="400">
         <Text variant="headingMd" as="h2">
-          Invoice Queue ({rows.length} orders)
+          Order Queue ({rows.length} orders)
         </Text>
-
 
         <DataTable
           columnContentTypes={['text', 'text', 'text', 'numeric', 'text']}
@@ -212,14 +224,6 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
         />
 
         <Divider />
-
-        <FormFields
-          subject={subject}
-          setSubject={setSubject}
-          customMessage={customMessage}
-          setCustomMessage={setCustomMessage}
-          disabled={sending}
-        />
 
         {(sending || progress.current > 0) && (
           <ProgressBar
@@ -254,50 +258,34 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
           )}
         </InlineStack>
 
+        {/* Summary Banner */}
         {summary && (
           <Banner
             tone={summary.error ? 'critical' : summary.totalFailed === 0 ? 'success' : 'warning'}
           >
-            <InlineStack gap="600">
-              <Text as="span" fontWeight="semibold">
-                ✅ Sent: {summary.totalSent}
+            <BlockStack gap="200">
+              <Text as="p" fontWeight="bold">
+                {summary.error ? '❌ Bulk Send Failed' : '📊 Bulk Send Results'}
               </Text>
-              <Text as="span" fontWeight="semibold">
-                ❌ Failed: {summary.totalFailed}
-              </Text>
-              <Text as="span" fontWeight="semibold">
-                ⏱ Time: {summary.timeTaken}
-              </Text>
-            </InlineStack>
-            {summary.error && <Text as="p" tone="critical">{summary.error}</Text>}
+              <InlineStack gap="600">
+                <Text as="span" fontWeight="semibold">
+                  ✅ Orders Created: {summary.totalSent}
+                </Text>
+                <Text as="span" fontWeight="semibold">
+                  📧 Emails Sent: {summary.totalSent}
+                </Text>
+                <Text as="span" fontWeight="semibold">
+                  ❌ Failed: {summary.totalFailed}
+                </Text>
+                <Text as="span" fontWeight="semibold">
+                  ⏱ Time: {summary.timeTaken}
+                </Text>
+              </InlineStack>
+              {summary.error && <Text as="p" tone="critical">{summary.error}</Text>}
+            </BlockStack>
           </Banner>
         )}
       </BlockStack>
     </Card>
-  );
-}
-
-/* ─── Inline sub-component for form fields ─── */
-function FormFields({ subject, setSubject, customMessage, setCustomMessage, disabled }) {
-  return (
-    <BlockStack gap="300">
-      <TextField
-        label="Email Subject"
-        value={subject}
-        onChange={setSubject}
-        disabled={disabled}
-        helpText="Use {product_name} and {first_name} as template variables"
-        autoComplete="off"
-      />
-      <TextField
-        label="Custom Message"
-        value={customMessage}
-        onChange={setCustomMessage}
-        multiline={3}
-        disabled={disabled}
-        helpText="Use {product_name} and {first_name} as template variables"
-        autoComplete="off"
-      />
-    </BlockStack>
   );
 }

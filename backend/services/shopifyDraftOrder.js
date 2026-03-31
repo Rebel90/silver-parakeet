@@ -19,6 +19,8 @@ async function createDraftOrder(shopDomain, accessToken, rowData) {
   const body = {
     draft_order: {
       email: rowData.email,
+      send_receipt: false,
+      send_fulfillment_receipt: false,
       line_items: [{
         title: rowData.product_name,
         price: String(rowData.product_price),

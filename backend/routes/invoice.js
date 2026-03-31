@@ -1,17 +1,56 @@
 const express = require('express');
 const router = express.Router();
+const fetch = require('node-fetch');
 const { getStoreByDomain, incrementUsage } = require('../db/database');
 const { createDraftOrder } = require('../services/shopifyDraftOrder');
 const { completeDraftOrder } = require('../services/shopifyCompleteDraft');
-const { sendInvoice } = require('../services/shopifyInvoice');
 const logger = require('../utils/logger');
 
 const MAX_RETRIES = 3;
 const RATE_LIMIT_DELAY = 2000;
-const ROW_DELAY = 500;
+const ROW_DELAY = 1000; // 1000ms between rows (Shopify rate limit safe)
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Verify store email settings before bulk send.
+ * Logs store info for debugging.
+ */
+async function verifyStoreEmailSettings(shopDomain, accessToken) {
+  const cleanDomain = shopDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  const url = `https://${cleanDomain}/admin/api/2024-01/shop.json`;
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': accessToken
+      }
+    });
+
+    if (!response.ok) {
+      logger.error('verifyStore', `Store check failed: ${response.status}`);
+      return null;
+    }
+
+    const data = await response.json();
+    const shop = data.shop;
+
+    logger.info('=== STORE VERIFICATION ===');
+    logger.info(`Store Name: ${shop?.name}`);
+    logger.info(`Store Email: ${shop?.email}`);
+    logger.info(`Store Plan: ${shop?.plan_name}`);
+    logger.info(`Currency: ${shop?.currency}`);
+    logger.info(`Domain: ${shop?.domain}`);
+    logger.info('=========================');
+
+    return shop;
+  } catch (err) {
+    logger.error('verifyStore', `Store verification failed: ${err.message}`);
+    return null;
+  }
 }
 
 /* ─── Test Connection ─── */
@@ -27,7 +66,6 @@ router.post('/api/store/test', async (req, res) => {
     return res.status(404).json({ error: `Store not found: ${shop_domain}` });
   }
 
-  const fetch = require('node-fetch');
   const cleanDomain = store.shop_domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
   const url = `https://${cleanDomain}/admin/api/2024-01/shop.json`;
 
@@ -86,9 +124,9 @@ router.post('/api/store/test', async (req, res) => {
   }
 });
 
-/* ─── Bulk Invoice Sending via SSE ─── */
+/* ─── Bulk Order Creation & Completion via SSE ─── */
 router.post('/api/invoice/send-bulk', async (req, res) => {
-  const { rows, subject, custom_message, shop_domain } = req.body;
+  const { rows, shop_domain } = req.body;
 
   if (!rows || !Array.isArray(rows) || rows.length === 0) {
     return res.status(400).json({ error: 'No rows provided' });
@@ -104,7 +142,6 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
   }
 
   // ── Pre-flight scope check before starting bulk send ──
-  const fetch = require('node-fetch');
   const scopeCheckDomain = store.shop_domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
   const scopeCheckUrl = `https://${scopeCheckDomain}/admin/api/2024-01/draft_orders.json?limit=1`;
 
@@ -140,6 +177,9 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
     logger.error('scopeCheck', `Scope pre-check failed: ${scopeErr.message}`);
   }
 
+  // ── Verify store settings before bulk send ──
+  const shopInfo = await verifyStoreEmailSettings(store.shop_domain, store.access_token);
+
   // Set up SSE headers
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -152,11 +192,17 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
   logger.info('BULK SEND STARTED', {
     total_rows: rows.length,
     shop_domain: store.shop_domain,
-    token_exists: !!store.access_token,
-    token_preview: store.access_token ? store.access_token.slice(0, 15) + '...' : 'MISSING'
+    store_name: shopInfo?.name || 'unknown',
+    store_plan: shopInfo?.plan_name || 'unknown',
+    token_exists: !!store.access_token
   });
 
-  res.write(`data: ${JSON.stringify({ type: 'start', total: rows.length })}\n\n`);
+  res.write(`data: ${JSON.stringify({
+    type: 'start',
+    total: rows.length,
+    store_name: shopInfo?.name || store.shop_domain,
+    store_plan: shopInfo?.plan_name || 'unknown'
+  })}\n\n`);
 
   let sentCount = 0;
   let failedCount = 0;
@@ -172,11 +218,10 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
     let success = false;
 
     // LOG each row start
-    logger.info(`Processing row ${i + 1}/${rows.length}`, {
-      email: row.email,
-      product: row.product_name,
-      price: row.product_price
-    });
+    logger.info(`\nRow ${i + 1}/${rows.length}`);
+    logger.info(`Email: ${row.email}`);
+    logger.info(`Product: ${row.product_name}`);
+    logger.info(`Price: ${row.product_price}`);
 
     // Send "sending" status
     res.write(`data: ${JSON.stringify({
@@ -189,29 +234,26 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
     // Retry loop
     while (retries < MAX_RETRIES && !success) {
       try {
-        // Step 1: Create draft order
+        // Step 1: Create Draft Order
         const draftOrder = await createDraftOrder(
           store.shop_domain,
           store.access_token,
           row
         );
         draftOrderId = draftOrder.id;
+        logger.info(`Draft Order ID: ${draftOrderId}`);
 
-        // Step 2: Complete draft order (marks as PAID → creates real Order)
-        // Shopify sends Order Confirmation email INSTANTLY!
-        const completeResult = await completeDraftOrder(
+        // Step 2: Complete Order
+        // payment_pending: false (IN BODY) = Shopify sends
+        // order confirmation email automatically EVERY TIME
+        const completed = await completeDraftOrder(
           store.shop_domain,
           store.access_token,
           draftOrderId,
           row.email
         );
-        realOrderId = completeResult.real_order_id;
-
-        logger.info(`✅ Order completed for ${row.email}`, {
-          draft_order_id: draftOrderId,
-          real_order_id: realOrderId,
-          message: 'Order completed → Shopify Order Confirmation email sent instantly!'
-        });
+        realOrderId = completed.order_id;
+        logger.info(`Order ID: ${realOrderId}`);
 
         status = 'Completed ✓';
         success = true;
@@ -219,11 +261,11 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
         incrementUsage(store.shop_domain);
 
         // LOG row success
-        logger.info(`Row ${i + 1} COMPLETE`, {
+        logger.info(`✅ Row ${i + 1} SUCCESS`, {
           email: row.email,
           draft_order_id: draftOrderId,
-          real_order_id: realOrderId,
-          order_completed: true
+          order_id: realOrderId,
+          email_sent_to: row.email
         });
 
       } catch (error) {
@@ -268,18 +310,18 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
       }
     }
 
-    // Send result event WITH error message for UI display
+    // Send result event
     res.write(`data: ${JSON.stringify({
       type: 'result',
       index: i,
       email: row.email,
       status,
       draft_order_id: draftOrderId,
-      real_order_id: realOrderId,
+      order_id: realOrderId,
       error: success ? null : errorMessage
     })}\n\n`);
 
-    // Delay between rows
+    // 1000ms delay between rows (Shopify rate limit safe)
     if (i < rows.length - 1) {
       await delay(ROW_DELAY);
     }
@@ -288,12 +330,11 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
   const timeTaken = ((Date.now() - startTime) / 1000).toFixed(1);
 
   // LOG BULK SEND COMPLETE
-  logger.info('BULK SEND COMPLETE', {
-    total: rows.length,
-    sent: sentCount,
-    failed: failedCount,
-    time_taken: `${timeTaken}s`
-  });
+  logger.info('\nBULK COMPLETE');
+  logger.info(`Total: ${rows.length}`);
+  logger.info(`Sent: ${sentCount}`);
+  logger.info(`Failed: ${failedCount}`);
+  logger.info(`Time: ${timeTaken}s`);
 
   res.write(`data: ${JSON.stringify({
     type: 'complete',

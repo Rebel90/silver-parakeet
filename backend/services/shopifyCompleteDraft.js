@@ -8,80 +8,82 @@ const logger = require('../utils/logger');
  * Shopify will automatically send an Order Confirmation email to the customer.
  *
  * PUT /admin/api/{version}/draft_orders/{draft_order_id}/complete.json
- * Query param: payment_pending=false (mark as fully paid)
+ *
+ * CRITICAL: payment_pending MUST be in the request BODY (not URL param)
+ * - payment_pending: false → Shopify marks as PAID and sends order confirmation email
+ * - payment_pending: true  → Shopify does NOT always send email (THIS WAS THE BUG!)
  */
-async function completeDraftOrder(shopDomain, accessToken, draftOrderId, customerEmail) {
+async function completeDraftOrder(shopDomain, accessToken, draftOrderId, email) {
 
   if (!draftOrderId) throw new Error('draftOrderId is missing');
   if (!accessToken) throw new Error('accessToken is missing');
 
-  // Wait 500ms after draft order creation to let Shopify process it
-  logger.info(`Waiting 500ms before completing draft order for ${customerEmail}...`);
-  await new Promise(resolve => setTimeout(resolve, 500));
+  // Wait 1000ms after draft order creation to let Shopify process it
+  await new Promise(resolve => setTimeout(resolve, 1000));
 
   const cleanDomain = shopDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
 
-  // payment_pending=false means the order is fully paid
-  const url = `https://${cleanDomain}/admin/api/${API_VERSION}/draft_orders/${draftOrderId}/complete.json?payment_pending=false`;
+  // NO query params — payment_pending goes in the BODY
+  const url = `https://${cleanDomain}/admin/api/${API_VERSION}/draft_orders/${draftOrderId}/complete.json`;
 
-  // LOG REQUEST
-  logger.request('PUT', url, {
-    draft_order_id: draftOrderId,
-    customer_email: customerEmail,
-    action: 'COMPLETE (mark as paid → triggers order confirmation email)'
-  });
+  logger.info('=== completeDraftOrder ===');
+  logger.info(`URL: ${url}`);
+  logger.info(`Draft Order ID: ${draftOrderId}`);
+  logger.info(`Customer Email: ${email}`);
 
   const response = await fetch(url, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
       'X-Shopify-Access-Token': accessToken
-    }
+    },
+    // CRITICAL FIX: payment_pending in BODY, not URL
+    body: JSON.stringify({
+      payment_pending: false
+    })
   });
 
   const responseText = await response.text();
-  let responseData;
-  try {
-    responseData = JSON.parse(responseText);
-  } catch {
-    responseData = { raw: responseText };
-  }
 
-  // LOG FULL RESPONSE
-  logger.response(url, response.status, responseData);
+  logger.info(`Status: ${response.status}`);
+  logger.info(`Response: ${responseText.slice(0, 500)}`);
 
   if (response.status === 429) {
-    logger.error('completeDraftOrder', `Rate limited for ${customerEmail}`, { status: 429 });
+    logger.error('completeDraftOrder', `Rate limited for ${email}`, { status: 429 });
     const err = new Error('Rate limited by Shopify');
     err.statusCode = 429;
     throw err;
   }
 
   if (!response.ok) {
-    logger.error('completeDraftOrder', `Complete failed for ${customerEmail}`, {
+    logger.error('completeDraftOrder', `Complete failed for ${email}`, {
       status: response.status,
-      response: responseData
+      response: responseText
     });
-    throw new Error(`complete_draft_order failed: ${response.status} — ${responseText}`);
+    throw new Error(`Complete order failed ${response.status}: ${responseText}`);
   }
 
-  const completedOrder = responseData.draft_order;
-  const realOrderId = completedOrder?.order_id;
+  let data;
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    throw new Error('Invalid JSON response: ' + responseText);
+  }
 
-  // LOG SUCCESS
-  logger.info(`✅ Draft Order COMPLETED for ${customerEmail}`, {
-    draft_order_id: draftOrderId,
-    real_order_id: realOrderId || 'pending',
-    status: completedOrder?.status,
-    order_status_url: completedOrder?.order_status_url || 'N/A',
-    message: 'Shopify will now send Order Confirmation email automatically!'
-  });
+  // Verify order_id exists in response
+  if (!data?.draft_order?.order_id) {
+    logger.error('completeDraftOrder', `Order not created for ${email}`, { response: data });
+    throw new Error('Order not created: ' + responseText);
+  }
 
-  return {
-    draft_order: completedOrder,
-    real_order_id: realOrderId,
-    order_status_url: completedOrder?.order_status_url
-  };
+  const completedOrder = data.draft_order;
+
+  logger.info('=== SUCCESS ===');
+  logger.info(`Order ID: ${completedOrder.order_id}`);
+  logger.info(`Email will be sent to: ${email}`);
+  logger.info(`Draft Status: ${completedOrder.status}`);
+
+  return completedOrder;
 }
 
 module.exports = { completeDraftOrder };
