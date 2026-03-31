@@ -197,21 +197,8 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
         );
         draftOrderId = draftOrder.id;
 
-        // Step 2: Send invoice FIRST (guaranteed email delivery)
-        await sendInvoice(
-          store.shop_domain,
-          store.access_token,
-          draftOrderId,
-          row,
-          subject,
-          custom_message
-        );
-
-        logger.info(`📧 Invoice email sent to ${row.email}`, {
-          draft_order_id: draftOrderId
-        });
-
-        // Step 3: Complete draft order (marks as PAID → creates real Order)
+        // Step 2: Complete draft order (marks as PAID → creates real Order)
+        // Shopify sends Order Confirmation email INSTANTLY!
         const completeResult = await completeDraftOrder(
           store.shop_domain,
           store.access_token,
@@ -223,7 +210,7 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
         logger.info(`✅ Order completed for ${row.email}`, {
           draft_order_id: draftOrderId,
           real_order_id: realOrderId,
-          message: 'Invoice sent + Order completed + Marked as PAID'
+          message: 'Order completed → Shopify Order Confirmation email sent instantly!'
         });
 
         status = 'Completed ✓';
@@ -236,7 +223,6 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
           email: row.email,
           draft_order_id: draftOrderId,
           real_order_id: realOrderId,
-          invoice_sent: true,
           order_completed: true
         });
 

@@ -15,9 +15,9 @@ async function completeDraftOrder(shopDomain, accessToken, draftOrderId, custome
   if (!draftOrderId) throw new Error('draftOrderId is missing');
   if (!accessToken) throw new Error('accessToken is missing');
 
-  // Wait 1500ms after draft order creation to let Shopify process it
-  logger.info(`Waiting 1500ms before completing draft order for ${customerEmail}...`);
-  await new Promise(resolve => setTimeout(resolve, 1500));
+  // Wait 500ms after draft order creation to let Shopify process it
+  logger.info(`Waiting 500ms before completing draft order for ${customerEmail}...`);
+  await new Promise(resolve => setTimeout(resolve, 500));
 
   const cleanDomain = shopDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
 
