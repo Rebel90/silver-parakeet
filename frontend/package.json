@@ -11,9 +11,11 @@
   "dependencies": {
     "@shopify/polaris": "^13.9.0",
     "@shopify/polaris-icons": "latest",
+    "axios": "^1.14.0",
     "papaparse": "^5.4.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.13.2"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

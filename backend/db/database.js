@@ -1,7 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const crypto = require('crypto');
-
+const bcrypt = require('bcryptjs');
 // --- Configuration ---
 const dbPath = path.join(__dirname, 'shopify_app.db');
 const db = new Database(dbPath);
@@ -47,6 +47,56 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_send_progress_session 
   ON send_progress(session_id)
 `);
+
+// --- Multi-User Tables ---
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    daily_limit INTEGER,
+    created_at TEXT DEFAULT (datetime('now')),
+    force_change_password INTEGER DEFAULT 1
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS activity_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    action TEXT NOT NULL,
+    details TEXT,
+    ip_address TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS usage_logs (
+    user_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    emails_sent_today INTEGER DEFAULT 0,
+    PRIMARY KEY (user_id, date)
+  )
+`);
+
+// --- Migrations for existing tables ---
+try {
+  db.exec("ALTER TABLE stores ADD COLUMN user_id INTEGER");
+} catch (e) {}
+
+try {
+  db.exec("ALTER TABLE send_progress ADD COLUMN user_id INTEGER");
+} catch (e) {}
+
+// --- Default Admin Account ---
+const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get('admin');
+if (!existingAdmin) {
+  const hash = bcrypt.hashSync('admin123', 10);
+  db.prepare('INSERT INTO users (username, password, role, force_change_password) VALUES (?, ?, ?, ?)').run('admin', hash, 'admin', 1);
+  console.log('[DB] Created default admin account (admin / admin123)');
+}
 
 // TASK 7 — Clear old sessions on startup (older than 7 days)
 function clearOldSessions() {
@@ -101,24 +151,32 @@ function decrypt(encryptedText, ivHex) {
 
 // --- Store Operations ---
 
-function addStore(api_name, shop_domain, access_token, max_orders = 100) {
+function addStore(user_id, api_name, shop_domain, access_token, max_orders = 100) {
   const { iv, encrypted } = encrypt(access_token);
   const stmt = db.prepare(`
-    INSERT INTO stores (api_name, shop_domain, access_token_encrypted, access_token_iv, max_orders)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO stores (user_id, api_name, shop_domain, access_token_encrypted, access_token_iv, max_orders)
+    VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(shop_domain) DO UPDATE SET
+      user_id = excluded.user_id,
       api_name = excluded.api_name,
       access_token_encrypted = excluded.access_token_encrypted,
       access_token_iv = excluded.access_token_iv,
       max_orders = excluded.max_orders
   `);
-  return stmt.run(api_name, shop_domain, encrypted, iv, max_orders);
+  return stmt.run(user_id, api_name, shop_domain, encrypted, iv, max_orders);
 }
 
-function getAllStores() {
-  const rows = db.prepare('SELECT * FROM stores ORDER BY created_at DESC').all();
+function getAllStores(user_id, role) {
+  let rows;
+  if (role === 'admin') {
+    rows = db.prepare('SELECT * FROM stores ORDER BY created_at DESC').all();
+  } else {
+    rows = db.prepare('SELECT * FROM stores WHERE user_id = ? ORDER BY created_at DESC').all(user_id);
+  }
+  
   return rows.map(row => ({
     id: row.id,
+    user_id: row.user_id,
     api_name: row.api_name,
     shop_domain: row.shop_domain,
     access_token: decrypt(row.access_token_encrypted, row.access_token_iv),
@@ -128,12 +186,19 @@ function getAllStores() {
   }));
 }
 
-function getStoreByDomain(shop_domain) {
-  const row = db.prepare('SELECT * FROM stores WHERE shop_domain = ?').get(shop_domain);
+function getStoreByDomain(shop_domain, user_id, role) {
+  let row;
+  if (role === 'admin') {
+    row = db.prepare('SELECT * FROM stores WHERE shop_domain = ?').get(shop_domain);
+  } else {
+    row = db.prepare('SELECT * FROM stores WHERE shop_domain = ? AND user_id = ?').get(shop_domain, user_id);
+  }
+  
   if (!row) return null;
   
   return {
     id: row.id,
+    user_id: row.user_id,
     api_name: row.api_name,
     shop_domain: row.shop_domain,
     access_token: decrypt(row.access_token_encrypted, row.access_token_iv),
@@ -143,20 +208,39 @@ function getStoreByDomain(shop_domain) {
   };
 }
 
-function deleteStoreByDomain(shop_domain) {
-  return db.prepare('DELETE FROM stores WHERE shop_domain = ?').run(shop_domain);
+function deleteStoreByDomain(shop_domain, user_id, role) {
+  if (role === 'admin') {
+    return db.prepare('DELETE FROM stores WHERE shop_domain = ?').run(shop_domain);
+  }
+  return db.prepare('DELETE FROM stores WHERE shop_domain = ? AND user_id = ?').run(shop_domain, user_id);
 }
 
-function deleteAllStores() {
-  return db.prepare('DELETE FROM stores').run();
+function deleteAllStores(user_id, role) {
+  if (role === 'admin') {
+    return db.prepare('DELETE FROM stores').run();
+  }
+  return db.prepare('DELETE FROM stores WHERE user_id = ?').run(user_id);
 }
 
 function incrementUsage(shop_domain) {
   return db.prepare('UPDATE stores SET usage_count = usage_count + 1 WHERE shop_domain = ?').run(shop_domain);
 }
 
-function resetAllUsage() {
-  return db.prepare('UPDATE stores SET usage_count = 0').run();
+function resetAllUsage(user_id, role) {
+  if (role === 'admin') {
+    return db.prepare('UPDATE stores SET usage_count = 0').run();
+  }
+  return db.prepare('UPDATE stores SET usage_count = 0 WHERE user_id = ?').run(user_id);
+}
+
+function logActivity(user_id, action, details, ip_address) {
+  try {
+    db.prepare('INSERT INTO activity_logs (user_id, action, details, ip_address) VALUES (?, ?, ?, ?)').run(
+      user_id, action, details || '', ip_address || ''
+    );
+  } catch (e) {
+    console.error('Failed to log activity:', e.message);
+  }
 }
 
 // --- Send Progress Operations (RESUME FEATURE) ---
@@ -165,13 +249,13 @@ function resetAllUsage() {
  * TASK 2 — Generate a unique session ID for a CSV batch.
  * Same CSV on same day = same session_id (enables resume detection).
  */
-function generateSessionId(rows, shopDomain) {
+function generateSessionId(rows, shopDomain, userId) {
   const firstEmail = rows[0]?.email || '';
   const lastEmail = rows[rows.length - 1]?.email || '';
   const count = rows.length;
   const date = new Date().toDateString();
 
-  const raw = `${firstEmail}-${lastEmail}-${count}-${shopDomain}-${date}`;
+  const raw = `${firstEmail}-${lastEmail}-${count}-${shopDomain}-${date}-${userId}`;
 
   // Simple hash
   let hash = 0;
@@ -228,15 +312,15 @@ function checkExistingProgress(sessionId) {
 /**
  * Save all rows as "pending" for a fresh session.
  */
-function initSessionRows(sessionId, shopDomain, rows) {
+function initSessionRows(sessionId, shopDomain, rows, user_id) {
   const stmt = db.prepare(
-    `INSERT INTO send_progress (session_id, shop_domain, email, row_index, status)
-     VALUES (?, ?, ?, ?, 'pending')`
+    `INSERT INTO send_progress (session_id, shop_domain, email, row_index, status, user_id)
+     VALUES (?, ?, ?, ?, 'pending', ?)`
   );
 
   const insertMany = db.transaction((rows) => {
     for (let i = 0; i < rows.length; i++) {
-      stmt.run(sessionId, shopDomain, rows[i].email, i);
+      stmt.run(sessionId, shopDomain, rows[i].email, i, user_id);
     }
   });
 
@@ -257,15 +341,21 @@ function updateRowProgress(sessionId, rowIndex, status, orderId, draftOrderId, e
 /**
  * Delete all progress for a session (Start Fresh).
  */
-function deleteSession(sessionId) {
-  return db.prepare('DELETE FROM send_progress WHERE session_id = ?').run(sessionId);
+function deleteSession(sessionId, user_id, role) {
+  if (role === 'admin') {
+    return db.prepare('DELETE FROM send_progress WHERE session_id = ?').run(sessionId);
+  }
+  return db.prepare('DELETE FROM send_progress WHERE session_id = ? AND user_id = ?').run(sessionId, user_id);
 }
 
 /**
  * Clear ALL send progress history.
  */
-function clearAllSendHistory() {
-  return db.prepare('DELETE FROM send_progress').run();
+function clearAllSendHistory(user_id, role) {
+  if (role === 'admin') {
+    return db.prepare('DELETE FROM send_progress').run();
+  }
+  return db.prepare('DELETE FROM send_progress WHERE user_id = ?').run(user_id);
 }
 
 /**
@@ -278,6 +368,7 @@ function getRowProgress(sessionId, rowIndex) {
 }
 
 module.exports = {
+  db,
   addStore,
   getAllStores,
   getStoreByDomain,
@@ -285,6 +376,7 @@ module.exports = {
   deleteAllStores,
   incrementUsage,
   resetAllUsage,
+  logActivity,
   // Resume feature exports
   generateSessionId,
   checkExistingProgress,
