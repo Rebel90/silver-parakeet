@@ -8,7 +8,9 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   // Set default api config
-  axios.defaults.baseURL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+  // Set default api config
+  const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3000';
+  axios.defaults.baseURL = API_BASE;
   axios.defaults.withCredentials = true;
 
   // Setup Axios interceptor to add bearer token to headers automatically

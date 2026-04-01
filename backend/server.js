@@ -17,14 +17,26 @@ const PORT = process.env.PORT || 3000;
 
 /* ─── Middleware ─── */
 app.use(cors({
-  origin: [
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:3000",
-    process.env.FRONTEND_URL || "http://localhost:5173"
-  ],
+  origin: function (origin, callback) {
+    // allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+
+    const allowedOrigins = [
+      "http://localhost:5173",
+      "http://localhost:3000",
+      "http://localhost:3001",
+      "http://127.0.0.1:5173",
+      "http://127.0.0.1:3000",
+      process.env.FRONTEND_URL
+    ];
+
+    if (allowedOrigins.indexOf(origin) !== -1 || origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      callback(null, true);
+    } else {
+      console.log('Blocked by CORS:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"]
@@ -42,7 +54,7 @@ app.use((req, res, next) => {
 
 /* ─── API Routes ─── */
 app.get("/api/health", (req, res) => {
-  res.json({ 
+  res.json({
     status: "ok",
     message: "Server is running",
     time: new Date().toISOString()
@@ -81,10 +93,11 @@ app.use((err, req, res, next) => {
 });
 
 /* ─── Start server ─── */
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ╔════════════════════════════════════╗
-║  Server running on port ${PORT}       ║
+║  Server running on port ${PORT}    ║
+║  Host: 0.0.0.0 (All interfaces)    ║
 ╠════════════════════════════════════╣
 ║  Routes available:                 ║
 ║  GET  /api/health                  ║
