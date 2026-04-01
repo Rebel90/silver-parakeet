@@ -388,9 +388,19 @@ router.post('/api/invoice/send-bulk', async (req, res) => {
       error: success ? null : errorMessage
     })}\n\n`);
 
-    // Delay between rows
-    if (i < rows.length - 1) {
-      await delay(ROW_DELAY);
+    // 2 seconds delay between each row
+    if (i < rows.length - 2) {
+      console.log(`Waiting 2 seconds before next email...`);
+      console.log(`Next email: ${rows[i + 2]?.email}`);
+      
+      res.write(`data: ${JSON.stringify({
+        type: 'waiting',
+        seconds: 2
+      })}\n\n`);
+
+      await new Promise(resolve => 
+        setTimeout(resolve, 10000)
+      );
     }
   }
 

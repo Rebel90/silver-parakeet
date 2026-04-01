@@ -31,6 +31,16 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
   const [resumeInfo, setResumeInfo] = useState(null);
   const [checkingProgress, setCheckingProgress] = useState(false);
   const [sessionId, setSessionId] = useState(null);
+  const [countdown, setCountdown] = useState(null);
+
+  // ─── Countdown Timer ───
+  useEffect(() => {
+    if (countdown === null || countdown <= 0) return;
+    const timer = setInterval(() => {
+      setCountdown(prev => (prev !== null && prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [countdown]);
 
   // ─── Check for existing session on mount ───
   useEffect(() => {
@@ -98,6 +108,7 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
       setProgress({ current: 0, total: rows.length, alreadySent: 0 });
       setResumeInfo(null);
     }
+    setCountdown(null);
 
     const alreadySentBefore = mode === 'resume' && resumeInfo ? resumeInfo.already_sent : 0;
 
@@ -145,6 +156,10 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
           case 'retry':
             break;
 
+          case 'waiting':
+            setCountdown(event.seconds);
+            break;
+
           case 'complete':
             setSummary({
               totalSent: event.total_sent,
@@ -159,6 +174,7 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
               ...prev,
               current: event.total_sent + event.total_failed
             }));
+            setCountdown(null);
             break;
 
           default:
@@ -257,6 +273,7 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
               totalFailed: event.total_failed,
               timeTaken: event.time_taken
             });
+            setCountdown(null);
             break;
 
           default:
@@ -295,6 +312,7 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
       setErrors({});
       setProgress({ current: 0, total: rows.length, alreadySent: 0 });
       setSummary(null);
+      setCountdown(null);
     } catch (err) {
       console.error('Clear history failed:', err);
     }
@@ -334,9 +352,14 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
     <Card>
       <BlockStack gap="400">
         <InlineStack align="space-between" blockAlign="center">
-          <Text variant="headingMd" as="h2">
-            Order Queue ({rows.length} orders)
-          </Text>
+          <BlockStack gap="100">
+            <Text variant="headingMd" as="h2">
+              Order Queue ({rows.length} orders)
+            </Text>
+            <Text variant="bodySm" tone="subdued">
+              1 second gap between each email. {rows.length} emails × 1s = ~{Math.ceil((rows.length * 2) / 60)} minutes
+            </Text>
+          </BlockStack>
           <Button variant="tertiary" tone="critical" onClick={handleClearHistory} disabled={sending}>
             🗑 Clear History
           </Button>
@@ -397,16 +420,22 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
         )}
 
         {/* ─── ACTION BUTTONS ─── */}
-        {!resumeInfo && (
-          <InlineStack gap="300" align="start">
+        {(!resumeInfo || sending) && (
+          <InlineStack gap="300" align="center" blockAlign="center">
             <Button
               variant="primary"
               onClick={() => handleSend('resume')}
-              loading={sending}
+              loading={sending && countdown === null}
               disabled={sending || rows.length === 0 || checkingProgress}
             >
               🚀 Send All Orders
             </Button>
+
+            {countdown > 0 && (
+              <Text tone="critical" fontWeight="semibold">
+                Next email in: {countdown}s
+              </Text>
+            )}
 
             {failedCount > 0 && !sending && (
               <>
