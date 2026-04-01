@@ -5,8 +5,11 @@ const API_BASE = import.meta.env.VITE_API_BASE || '';
  */
 async function apiFetch(endpoint, options = {}) {
   const url = endpoint.startsWith('http') ? endpoint : `${API_BASE}${endpoint}`;
+  const token = localStorage.getItem('token');
+  const authHeaders = token ? { 'Authorization': `Bearer ${token}` } : {};
+
   const config = {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
     credentials: 'include',
     ...options
   };
@@ -129,9 +132,12 @@ export function sendBulkInvoices(rows, subject, customMessage, shopDomain, onEve
   const { sessionId, mode } = options;
 
   return new Promise((resolve, reject) => {
+    const token = localStorage.getItem('token');
+    const authHeaders = token ? { 'Authorization': `Bearer ${token}` } : {};
+
     fetch(`${API_BASE}/api/invoice/send-bulk`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders },
       credentials: 'include',
       body: JSON.stringify({
         rows,

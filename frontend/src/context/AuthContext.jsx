@@ -11,6 +11,21 @@ export function AuthProvider({ children }) {
   axios.defaults.baseURL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
   axios.defaults.withCredentials = true;
 
+  // Setup Axios interceptor to add bearer token to headers automatically
+  useEffect(() => {
+    const interceptor = axios.interceptors.request.use((config) => {
+      const token = localStorage.getItem('token');
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+      }
+      return config;
+    });
+
+    return () => {
+      axios.interceptors.request.eject(interceptor);
+    };
+  }, []);
+
   const fetchUser = async () => {
     try {
       const res = await axios.get('/api/auth/me');
@@ -28,12 +43,18 @@ export function AuthProvider({ children }) {
 
   const login = async (username, password) => {
     const res = await axios.post('/api/auth/login', { username, password });
+    if (res.data.token) {
+      localStorage.setItem('token', res.data.token);
+    }
     setUser(res.data.user);
     return res.data;
   };
 
   const logout = async () => {
-    await axios.post('/api/auth/logout');
+    try {
+      await axios.post('/api/auth/logout');
+    } catch(e) {}
+    localStorage.removeItem('token');
     setUser(null);
   };
 
