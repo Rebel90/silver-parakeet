@@ -3,8 +3,14 @@ const path = require('path');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 // --- Configuration ---
-const dbPath = path.join(__dirname, 'shopify_app.db');
-const db = new Database(dbPath);
+let db;
+try {
+  const dbPath = path.join(__dirname, 'shopify_app.db');
+  db = new Database(dbPath);
+  console.log("Database connected: " + dbPath);
+} catch (error) {
+  console.error("DB Error:", error.message);
+}
 
 // Encryption Key should be 32 bytes for AES-256-CBC
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;

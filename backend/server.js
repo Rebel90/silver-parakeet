@@ -13,59 +13,51 @@ const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-/* ─── Middleware ─── */
+// 1. CORS — FIRST
 app.use(cors({
-  origin: function (origin, callback) {
-    // allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-
-    const allowedOrigins = [
-      "http://localhost:5173",
-      "http://localhost:3000",
-      "http://localhost:3001",
-      "http://127.0.0.1:5173",
-      "http://127.0.0.1:3000",
-      "https://shopify-emails.netlify.app",
-      "https://silver-parakeet-production.up.railway.app",
-      process.env.FRONTEND_URL
-    ];
-
-    const isLocal = origin.includes('localhost') || origin.includes('127.0.0.1');
-    const isAllowed = allowedOrigins.includes(origin) || allowedOrigins.includes(origin + '/');
-
-    if (isAllowed || isLocal) {
-      callback(null, true);
-    } else {
-      console.log('Blocked by CORS:', origin);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: [
+    "https://shopify-emails.netlify.app",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:3001"
+  ],
   credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE"],
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
-app.use(express.json({ limit: '10mb' }));
+app.options("*", cors());
+
+// 2. Body parser
+app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-/* ─── Request logging ─── */
+// 3. Request logger
 app.use((req, res, next) => {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] ${req.method} ${req.path}`);
+  console.log(`${req.method} ${req.path}`);
   next();
 });
 
-/* ─── API Routes ─── */
-app.get("/api/health", (req, res) => {
-  res.json({
+// 4. Health check — BEFORE other routes
+app.get("/", (req, res) => {
+  res.json({ 
     status: "ok",
     message: "Server is running",
-    time: new Date().toISOString()
+    time: new Date().toISOString(),
+    env: process.env.NODE_ENV
   });
 });
 
+app.get("/api/health", (req, res) => {
+  res.json({ 
+    status: "ok",
+    message: "Server is running"
+  });
+});
+
+// 5. ALL ROUTES
 app.use(storeRoutes);
 app.use(csvRoutes);
 app.use(invoiceRoutes);
@@ -73,36 +65,21 @@ app.use(logRoutes);
 app.use(authRoutes);
 app.use(adminRoutes);
 
-/* ─── Serve frontend in production ─── */
-const fs = require('fs');
-const frontendBuildPath = path.join(__dirname, '..', 'frontend', 'dist');
-const frontendIndexPath = path.join(frontendBuildPath, 'index.html');
-
-if (fs.existsSync(frontendBuildPath)) {
-  app.use(express.static(frontendBuildPath));
-  app.get('*', (req, res) => {
-    if (!req.path.startsWith('/api')) {
-      res.sendFile(frontendIndexPath);
-    }
-  });
-} else {
-  app.get('/', (req, res) => {
-    res.json({ message: 'Backend API running. Frontend is at http://localhost:5173 in dev mode.' });
-  });
-}
-
-/* ─── Error handler ─── */
+// 6. Error handler — LAST
 app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ error: 'Internal server error' });
+  console.error("Server Error:", err.message);
+  res.status(500).json({ 
+    error: err.message 
+  });
 });
 
-/* ─── Start server ─── */
-app.listen(PORT, '0.0.0.0', () => {
+// 7. Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`
 ╔════════════════════════════════════╗
-║  Server running on port ${PORT}    ║
-║  Host: 0.0.0.0 (All interfaces)    ║
+║  Server running on port ${PORT}       ║
+║  Host: 0.0.0.0 (Railway Required)   ║
 ╠════════════════════════════════════╣
 ║  Routes available:                 ║
 ║  GET  /api/health                  ║
