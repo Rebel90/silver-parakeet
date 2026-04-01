@@ -201,37 +201,21 @@ router.post('/api/invoice/send-bulk', authenticateToken, async (req, res) => {
   if (!rows || !Array.isArray(rows) || rows.length === 0) {
     return res.status(400).json({ error: 'No rows provided' });
   }
-  if (!shop_domain) {
-    return res.status(400).json({ error: 'shop_domain is required' });
+  let currentAPI = getNextAvailableAPI(req.user.id);
+
+  if (!currentAPI) {
+    return res.status(404).json({ error: 'No API available. Add more API keys or reset usage.' });
   }
 
-  const store = getStoreByDomain(shop_domain, req.user.id, req.user.role);
-  if (!store) {
-    return res.status(404).json({ error: `Store not found: ${shop_domain}` });
-  }
+  // Use the shop_domain from request OR the first available API's domain
+  const effectiveShopDomain = shop_domain || currentAPI.shop_domain;
 
-  // Pre-flight scope check
-  const scopeCheckDomain = store.shop_domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
-  const scopeCheckUrl = `https://${scopeCheckDomain}/admin/api/2024-01/draft_orders.json?limit=1`;
-
-  try {
-    const scopeResp = await fetch(scopeCheckUrl, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': store.access_token }
-    });
-
-    if (scopeResp.status === 403) {
-      return res.status(403).json({ error: 'write_draft_orders scope missing.', scope_error: true });
-    }
-    if (scopeResp.status === 401) {
-      return res.status(401).json({ error: 'Token invalid or expired.', scope_error: true });
-    }
-  } catch (scopeErr) {
-    logger.error('scopeCheck', scopeErr.message);
-  }
+  // Pre-flight scope check skipped since we rely on the API pool dynamically.
+  // We do not abort the whole request for a single API scope failure, 
+  // rather we will let the loop fail and switch.
 
   // Session handling
-  const sessionId = clientSessionId || generateSessionId(rows, shop_domain, req.user.id);
+  const sessionId = clientSessionId || generateSessionId(rows, effectiveShopDomain, req.user.id);
   let progress = checkExistingProgress(sessionId);
 
   if (mode === 'fresh' && progress.isResume) {
@@ -240,11 +224,10 @@ router.post('/api/invoice/send-bulk', authenticateToken, async (req, res) => {
   }
 
   if (!progress.isResume) {
-    initSessionRows(sessionId, shop_domain, rows, req.user.id);
+    initSessionRows(sessionId, effectiveShopDomain, rows, req.user.id);
   }
 
-  // Verify store
-  const shopInfo = await verifyStoreEmailSettings(store.shop_domain, store.access_token);
+  const shopInfo = null; // Removed blocking verify query since we dynamically switch APIs
 
   // SSE headers
   res.writeHead(200, {
@@ -264,12 +247,12 @@ router.post('/api/invoice/send-bulk', authenticateToken, async (req, res) => {
     is_resume: progress.isResume,
     already_sent: alreadySentCount,
     remaining: remainingCount,
-    store_name: shopInfo?.name || store.shop_domain
+    store_name: currentAPI.api_name
   })}\n\n`);
 
   logger.info('=== BULK SEND START ===');
   logger.info(`Session: ${sessionId} | Total: ${rows.length} | Resume: ${progress.isResume} | Already sent: ${alreadySentCount}`);
-  logActivity(req.user.id, 'Bulk Send Started', `Started bulk send for ${rows.length} rows on ${store.shop_domain}`, req.ip);
+  logActivity(req.user.id, 'Bulk Send Started', `Started bulk send for ${rows.length} rows using pool`, req.ip);
 
   let sentCount = alreadySentCount;
   let failedCount = 0;
@@ -327,47 +310,59 @@ router.post('/api/invoice/send-bulk', authenticateToken, async (req, res) => {
     // Retry loop
     while (retries < MAX_RETRIES && !success) {
       try {
-        // ═══ STEP 1: Create Draft Order ═══
         const draftOrder = await createDraftOrder(
-          store.shop_domain,
-          store.access_token,
+          currentAPI.shop_domain,
+          currentAPI.access_token,
           row
         );
         draftOrderId = draftOrder.id;
-        logger.info(`Step 1 OK: Draft #${draftOrderId}`);
 
-        // ═══ STEP 2: Complete Draft Order ═══
-        // payment_pending=false in URL query param → marks PAID
-        // Shopify auto-triggers "Order Confirmation" email
         const completed = await completeDraftOrder(
-          store.shop_domain,
-          store.access_token,
+          currentAPI.shop_domain,
+          currentAPI.access_token,
           draftOrderId,
           row.email
         );
         realOrderId = completed.order_id;
-        logger.info(`Step 2 OK: Completed -> Order #${realOrderId}`);
-
-        // ═══ STEP 3: Verify order was created correctly ═══
-        await verifyOrderEmail(store.shop_domain, store.access_token, realOrderId, row.email);
+        
+        await verifyOrderEmail(currentAPI.shop_domain, currentAPI.access_token, realOrderId, row.email);
 
         status = 'Completed';
         success = true;
         sentCount++;
-        incrementUsage(store.shop_domain);
+        currentAPI.usage_count++;
+
+        markAPIUsed(currentAPI.id);
         incrementDailyLimit(req.user.id);
+        updateRowProgress(sessionId, i, 'sent', String(realOrderId), String(draftOrderId), null, currentAPI.id, currentAPI.api_name);
 
-        // Save to database
-        updateRowProgress(sessionId, i, 'sent', String(realOrderId), String(draftOrderId), null);
+        logger.info(`=== Row ${i + 1} SUCCESS: Order #${realOrderId} -> ${row.email} | API: ${currentAPI.api_name} ===`);
 
-        logger.info(`=== Row ${i + 1} SUCCESS: Order #${realOrderId} -> ${row.email} ===`);
+        // Check if exhausted
+        if (currentAPI.usage_count >= currentAPI.max_orders) {
+          logger.info(`\n⚠️ API "${currentAPI.api_name}" limit reached! (${currentAPI.usage_count}/${currentAPI.max_orders})`);
+          markAPIExhausted(currentAPI.id);
+          
+          currentAPI = getNextAvailableAPI(req.user.id);
+          if (!currentAPI) {
+            errorMessage = "All APIs exhausted";
+            break; // Break the retry loop natively
+          }
 
+          logger.info(`✅ Switching to API: ${currentAPI.api_name}`);
+          res.write(`data: ${JSON.stringify({
+            type: "api_switch",
+            message: `Switched to API: ${currentAPI.api_name}`,
+            row: i + 1,
+            newAPI: currentAPI.api_name
+          })}\n\n`);
+        }
       } catch (error) {
         retries++;
         errorMessage = error.message;
 
-        logger.error('Row Failed', `Row ${i + 1}: ${row.email} - Attempt ${retries}/${MAX_RETRIES}: ${error.message}`);
-
+        logger.error('Row Failed', `Row ${i + 1}: ${row.email} | API: ${currentAPI.api_name} - Attempt ${retries}/${MAX_RETRIES}: ${error.message}`);
+        
         if (error.statusCode === 429 && retries < MAX_RETRIES) {
           res.write(`data: ${JSON.stringify({
             type: 'retry',
@@ -381,7 +376,6 @@ router.post('/api/invoice/send-bulk', authenticateToken, async (req, res) => {
         }
 
         if (retries >= MAX_RETRIES) break;
-
         status = !draftOrderId ? 'Failed - Order Error' : 'Failed - Complete Error';
         break;
       }
@@ -390,7 +384,16 @@ router.post('/api/invoice/send-bulk', authenticateToken, async (req, res) => {
     if (!success) {
       failedCount++;
       status = !draftOrderId ? 'Failed - Order Error' : 'Failed - Complete Error';
-      updateRowProgress(sessionId, i, 'failed', null, draftOrderId ? String(draftOrderId) : null, errorMessage);
+      updateRowProgress(sessionId, i, 'failed', null, draftOrderId ? String(draftOrderId) : null, errorMessage, currentAPI.id, currentAPI.api_name);
+    }
+
+    if (errorMessage === "All APIs exhausted") {
+      res.write(`data: ${JSON.stringify({
+        type: 'all_exhausted',
+        message: 'All APIs exhausted mid-send',
+        sent_so_far: sentCount
+      })}\n\n`);
+      break; 
     }
 
     // Send result
@@ -399,23 +402,24 @@ router.post('/api/invoice/send-bulk', authenticateToken, async (req, res) => {
       index: i,
       email: row.email,
       status,
+      api_used: currentAPI.api_name,
       draft_order_id: draftOrderId,
       order_id: realOrderId,
       error: success ? null : errorMessage
     })}\n\n`);
 
-    // 2 seconds delay between each row
-    if (i < rows.length - 1) {
-      console.log(`Waiting 2 seconds before next email...`);
+    // 10 seconds delay between each row
+    if (i < rows.length - 1 && errorMessage !== "All APIs exhausted") {
+      console.log(`Waiting 10 seconds before next email...`);
       console.log(`Next email: ${rows[i + 1]?.email}`);
       
       res.write(`data: ${JSON.stringify({
         type: 'waiting',
-        seconds: 2
+        seconds: 10
       })}\n\n`);
 
       await new Promise(resolve => 
-        setTimeout(resolve, 2000)
+        setTimeout(resolve, 10000)
       );
     }
   }
@@ -425,7 +429,7 @@ router.post('/api/invoice/send-bulk', authenticateToken, async (req, res) => {
 
   logger.info('=== BULK SEND COMPLETE ===');
   logger.info(`Total: ${rows.length} | Skipped: ${skippedCount} | Newly Sent: ${newlySent} | Failed: ${failedCount} | Time: ${timeTaken}s`);
-  logActivity(req.user.id, 'Bulk Send Completed', `Completed bulk send for ${rows.length} rows on ${store.shop_domain}. ${newlySent} sent, ${failedCount} failed.`, req.ip);
+  logActivity(req.user.id, 'Bulk Send Completed', `Completed bulk send for ${rows.length} rows using dynamic pool. ${newlySent} sent, ${failedCount} failed.`, req.ip);
 
   res.write(`data: ${JSON.stringify({
     type: 'complete',

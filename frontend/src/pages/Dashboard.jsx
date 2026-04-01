@@ -15,6 +15,7 @@ import {
 } from '@shopify/polaris';
 import StoreSetupPanel from '../components/StoreSetupPanel.jsx';
 import CsvUploadPanel from '../components/CsvUploadPanel.jsx';
+import ApiPoolTable from '../components/ApiPoolTable.jsx';
 import InvoiceTable from '../components/InvoiceTable.jsx';
 import LogViewer from '../components/LogViewer.jsx';
 import { getStores, testStoreConnection, reconnectStore } from '../utils/apiClient';
@@ -25,7 +26,6 @@ export default function Dashboard() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [stores, setStores] = useState([]);
-  const [selectedStore, setSelectedStore] = useState('');
   const [orderRows, setOrderRows] = useState([]);
   const [authMessage, setAuthMessage] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState(null);
@@ -40,18 +40,14 @@ export default function Dashboard() {
   const [reconnectLoading, setReconnectLoading] = useState(false);
   const [reconnectError, setReconnectError] = useState(null);
 
-  /* ─── Load stores on mount ─── */
   const fetchStores = useCallback(async () => {
     try {
       const data = await getStores();
       setStores(data.stores || []);
-      if (data.stores && data.stores.length > 0 && !selectedStore) {
-        setSelectedStore(data.stores[0].shop_domain);
-      }
     } catch (err) {
       console.error('Failed to load stores:', err);
     }
-  }, [selectedStore]);
+  }, []);
 
   useEffect(() => {
     fetchStores();
@@ -215,91 +211,19 @@ export default function Dashboard() {
         </Layout>
 
         {stores.length > 0 && (
-          <Card>
-            <BlockStack gap="300">
-              <InlineStack align="space-between" blockAlign="center">
-                <Text variant="headingMd" as="h2">Connected Stores</Text>
-                <Button
-                  onClick={handleTestConnection}
-                  loading={testingConnection}
-                  disabled={!selectedStore || testingConnection}
-                  size="slim"
-                >
-                  🔌 Test Connection
-                </Button>
-              </InlineStack>
-
-              {connectionStatus && (
-                <Banner
-                  tone={connectionStatus.success ? 'success' : 'critical'}
-                  onDismiss={() => setConnectionStatus(null)}
-                >
-                  <p>{connectionStatus.message}</p>
-                  {connectionStatus.shop_email && (
-                    <p style={{ fontSize: '12px', marginTop: '4px' }}>
-                      Store email: {connectionStatus.shop_email} | Plan: {connectionStatus.plan}
-                    </p>
-                  )}
-                </Banner>
-              )}
-
-              <InlineStack gap="200" wrap>
-                {stores.map(store => (
-                  <div
-                    key={store.id}
-                    onClick={() => setSelectedStore(store.shop_domain)}
-                    style={{
-                      padding: '8px 16px',
-                      borderRadius: '8px',
-                      border: `2px solid ${selectedStore === store.shop_domain ? '#2563eb' : (scopeError ? '#e53e3e' : '#e4e5e7')}`,
-                      backgroundColor: selectedStore === store.shop_domain ? '#eff6ff' : '#fff',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s ease'
-                    }}
-                  >
-                    <BlockStack gap="100">
-                      <Text variant="bodySm" fontWeight="semibold" as="span">
-                        {store.api_name}
-                      </Text>
-                      <Text variant="bodySm" tone="subdued" as="span">
-                        {store.shop_domain}
-                      </Text>
-                      <InlineStack gap="100">
-                        <Badge tone="info" size="small">
-                          {store.usage_count} / {store.max_orders} used
-                        </Badge>
-                      </InlineStack>
-                      <div style={{ marginTop: '4px' }}>
-                        <Button
-                          size="slim"
-                          variant="tertiary"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openReconnectModal(store.shop_domain);
-                          }}
-                          tone={scopeError ? 'critical' : undefined}
-                        >
-                          🔄 Reconnect
-                        </Button>
-                      </div>
-                    </BlockStack>
-                  </div>
-                ))}
-              </InlineStack>
-            </BlockStack>
-          </Card>
+          <ApiPoolTable stores={stores} onRefresh={fetchStores} />
         )}
 
         {orderRows.length > 0 && (
           <>
-            {!selectedStore && (
+            {stores.length === 0 && (
               <Banner tone="warning">
-                <p>Please add and select a store before sending invoices.</p>
+                <p>Please add an API key before sending invoices.</p>
               </Banner>
             )}
             <InvoiceTable
               rows={orderRows}
-              shopDomain={selectedStore}
+              shopDomain="API_POOL"
               onComplete={fetchStores}
               onScopeError={handleScopeError}
             />

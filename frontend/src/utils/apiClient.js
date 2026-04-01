@@ -45,6 +45,14 @@ export function resetUsage() {
   return apiFetch('/api/usage/reset', { method: 'POST' });
 }
 
+export function resetApiUsage(apiId) {
+  return apiFetch(`/api/store/${apiId}/reset`, { method: 'POST' });
+}
+
+export function resetAllApis() {
+  return apiFetch(`/api/stores/reset-all`, { method: 'POST' });
+}
+
 export function testStoreConnection(shopDomain) {
   return apiFetch('/api/store/test', {
     method: 'POST',

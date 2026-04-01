@@ -90,6 +90,14 @@ try {
   db.exec("ALTER TABLE send_progress ADD COLUMN user_id INTEGER");
 } catch (e) {}
 
+// --- Migrations for Auto API Switching ---
+try { db.exec("ALTER TABLE stores ADD COLUMN is_exhausted INTEGER DEFAULT 0"); } catch (e) {}
+try { db.exec("ALTER TABLE stores ADD COLUMN is_active INTEGER DEFAULT 1"); } catch (e) {}
+try { db.exec("ALTER TABLE stores ADD COLUMN priority INTEGER DEFAULT 1"); } catch (e) {}
+
+try { db.exec("ALTER TABLE send_progress ADD COLUMN api_id INTEGER"); } catch (e) {}
+try { db.exec("ALTER TABLE send_progress ADD COLUMN api_name TEXT"); } catch (e) {}
+
 // --- Default Admin Account ---
 const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get('admin');
 if (!existingAdmin) {
@@ -243,6 +251,50 @@ function logActivity(user_id, action, details, ip_address) {
   }
 }
 
+// --- Auto API Switch Functions ---
+function getNextAvailableAPI(user_id) {
+  const apis = db.prepare(`
+    SELECT * FROM stores
+    WHERE user_id = ?
+    AND is_active = 1
+    AND is_exhausted = 0
+    AND usage_count < max_orders
+    ORDER BY priority ASC
+    LIMIT 1
+  `).all(user_id);
+
+  if (apis.length === 0) return null;
+
+  const api = apis[0];
+  const decipher = crypto.createDecipheriv(ALGORITHM, Buffer.from(ENCRYPTION_KEY, 'hex'), Buffer.from(api.access_token_iv, 'hex'));
+  let decrypted = decipher.update(api.access_token_encrypted, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  
+  return { ...api, access_token: decrypted };
+}
+
+function markAPIUsed(api_id) {
+  db.prepare(`
+    UPDATE stores
+    SET usage_count = usage_count + 1,
+        is_exhausted = CASE 
+          WHEN usage_count + 1 >= max_orders 
+          THEN 1 ELSE 0 
+        END
+    WHERE id = ?
+  `).run(api_id);
+}
+
+function markAPIExhausted(api_id) {
+  db.prepare(`
+    UPDATE stores
+    SET is_exhausted = 1,
+        is_active = 0
+    WHERE id = ?
+  `).run(api_id);
+  console.log(`API ${api_id} exhausted — switching to next`);
+}
+
 // --- Usage & Daily Limits ---
 function checkDailyLimit(user_id) {
   const user = db.prepare('SELECT daily_limit FROM users WHERE id = ?').get(user_id);
@@ -354,12 +406,12 @@ function initSessionRows(sessionId, shopDomain, rows, user_id) {
 /**
  * Update a row's status after send attempt.
  */
-function updateRowProgress(sessionId, rowIndex, status, orderId, draftOrderId, errorMessage) {
+function updateRowProgress(sessionId, rowIndex, status, orderId, draftOrderId, errorMessage, api_id = null, api_name = null) {
   db.prepare(
     `UPDATE send_progress 
-     SET status = ?, order_id = ?, draft_order_id = ?, error_message = ?, updated_at = datetime('now')
+     SET status = ?, order_id = ?, draft_order_id = ?, error_message = ?, api_id = ?, api_name = ?, updated_at = datetime('now')
      WHERE session_id = ? AND row_index = ?`
-  ).run(status, orderId || null, draftOrderId || null, errorMessage || null, sessionId, rowIndex);
+  ).run(status, orderId || null, draftOrderId || null, errorMessage || null, api_id, api_name, sessionId, rowIndex);
 }
 
 /**
@@ -411,5 +463,8 @@ module.exports = {
   deleteSession,
   clearAllSendHistory,
   clearOldSessions,
-  getRowProgress
+  getRowProgress,
+  getNextAvailableAPI,
+  markAPIUsed,
+  markAPIExhausted
 };

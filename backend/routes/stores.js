@@ -9,7 +9,8 @@ const {
   deleteStoreByDomain,
   resetAllUsage,
   getStoreByDomain,
-  logActivity
+  logActivity,
+  db
 } = require('../db/database');
 const {
   buildAuthUrl,
@@ -233,6 +234,36 @@ router.post('/api/usage/reset', authenticateToken, (req, res) => {
   try {
     resetAllUsage(req.user.id, req.user.role);
     res.json({ success: true, message: 'Usage counters reset' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/* ─── Auto API Switch Reset ─── */
+router.post('/api/store/:id/reset', authenticateToken, (req, res) => {
+  try {
+    const apiId = req.params.id;
+    if (req.user.role === 'admin') {
+      db.prepare('UPDATE stores SET usage_count = 0, is_exhausted = 0, is_active = 1 WHERE id = ?').run(apiId);
+    } else {
+      db.prepare('UPDATE stores SET usage_count = 0, is_exhausted = 0, is_active = 1 WHERE id = ? AND user_id = ?').run(apiId, req.user.id);
+    }
+    logActivity(req.user.id, 'API Reset', `Reset usage for API ID ${apiId}`, req.ip);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/api/stores/reset-all', authenticateToken, (req, res) => {
+  try {
+    if (req.user.role === 'admin') {
+      db.prepare('UPDATE stores SET usage_count = 0, is_exhausted = 0, is_active = 1').run();
+    } else {
+      db.prepare('UPDATE stores SET usage_count = 0, is_exhausted = 0, is_active = 1 WHERE user_id = ?').run(req.user.id);
+    }
+    logActivity(req.user.id, 'API Reset All', `Reset usage for all APIs`, req.ip);
+    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

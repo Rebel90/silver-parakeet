@@ -27,6 +27,11 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
   const [progress, setProgress] = useState({ current: 0, total: rows.length, alreadySent: 0 });
   const [summary, setSummary] = useState(null);
 
+  // Auto API tracking
+  const [apiUsed, setApiUsed] = useState({});
+  const [apiSwitchedBanner, setApiSwitchedBanner] = useState(null);
+  const [allExhaustedBanner, setAllExhaustedBanner] = useState(null);
+
   // Resume state
   const [resumeInfo, setResumeInfo] = useState(null);
   const [checkingProgress, setCheckingProgress] = useState(false);
@@ -105,10 +110,13 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
       // Reset everything for fresh start
       setStatuses(rows.map(() => 'Pending'));
       setOrderIds({});
+      setApiUsed({});
       setProgress({ current: 0, total: rows.length, alreadySent: 0 });
       setResumeInfo(null);
     }
     setCountdown(null);
+    setApiSwitchedBanner(null);
+    setAllExhaustedBanner(null);
 
     const alreadySentBefore = mode === 'resume' && resumeInfo ? resumeInfo.already_sent : 0;
 
@@ -141,6 +149,9 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
             if (event.order_id) {
               setOrderIds(prev => ({ ...prev, [event.index]: event.order_id }));
             }
+            if (event.api_used) {
+              setApiUsed(prev => ({ ...prev, [event.index]: event.api_used }));
+            }
             if (event.error) {
               setErrors(prev => ({ ...prev, [event.index]: event.error }));
             }
@@ -158,6 +169,14 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
 
           case 'waiting':
             setCountdown(event.seconds);
+            break;
+
+          case 'api_switch':
+            setApiSwitchedBanner({ message: event.message, newApi: event.newAPI, row: event.row });
+            break;
+
+          case 'all_exhausted':
+            setAllExhaustedBanner({ message: event.message, sentSoFar: event.sent_so_far });
             break;
 
           case 'complete':
@@ -341,6 +360,11 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
           ❌ {errors[i]}
         </div>
       )}
+      {apiUsed[i] && statuses[i] !== 'Skipped' && (
+        <div style={{ fontSize: '11px', color: '#1a7f37', marginTop: '2px' }}>
+          🌐 API: {apiUsed[i]}
+        </div>
+      )}
     </div>
   ]);
 
@@ -357,7 +381,7 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
               Order Queue ({rows.length} orders)
             </Text>
             <Text variant="bodySm" tone="subdued">
-              2 second gap between each email. {rows.length} emails × 2s = ~{Math.ceil((rows.length * 2) / 60)} minutes
+              10 second gap between each email. {rows.length} emails × 10s = ~{Math.ceil((rows.length * 10) / 60)} minutes
             </Text>
           </BlockStack>
           <Button variant="tertiary" tone="critical" onClick={handleClearHistory} disabled={sending}>
@@ -395,6 +419,45 @@ export default function InvoiceTable({ rows, shopDomain, onComplete, onScopeErro
               </InlineStack>
               <Text as="p" variant="bodySm" tone="subdued">
                 ⚠️ "Start Fresh" will re-send to customers who already received email.
+              </Text>
+            </BlockStack>
+          </Banner>
+        )}
+
+        {/* ─── API SWITCH BANNER ─── */}
+        {apiSwitchedBanner && !allExhaustedBanner && (
+          <Banner tone="info" onDismiss={() => setApiSwitchedBanner(null)}>
+            <BlockStack gap="200">
+              <Text as="p" fontWeight="bold">
+                🔄 API Switched!
+              </Text>
+              <Text as="p">
+                {apiSwitchedBanner.message}. Continuing from row {apiSwitchedBanner.row}...
+              </Text>
+            </BlockStack>
+          </Banner>
+        )}
+
+        {/* ─── ALL EXHAUSTED BANNER ─── */}
+        {allExhaustedBanner && (
+          <Banner tone="critical">
+            <BlockStack gap="200">
+              <Text as="p" fontWeight="bold">
+                ❌ All APIs Exhausted!
+              </Text>
+              <Text as="p">
+                Sent: <strong>{allExhaustedBanner.sentSoFar}</strong> emails | Remaining: <strong>{rows.length - allExhaustedBanner.sentSoFar}</strong> emails
+              </Text>
+              <Text as="p">
+                Progress saved at row {allExhaustedBanner.sentSoFar}. 
+              </Text>
+              <Text as="p">
+                To continue:
+                <ol style={{ margin: '4px 0 4px 20px', lineHeight: '1.8' }}>
+                  <li>Add new API keys in Dashboard</li>
+                  <li>Upload same CSV again</li>
+                  <li>System will auto-resume!</li>
+                </ol>
               </Text>
             </BlockStack>
           </Banner>
