@@ -251,7 +251,6 @@ function logActivity(user_id, action, details, ip_address) {
   }
 }
 
-// --- Auto API Switch Functions ---
 function getNextAvailableAPI(user_id) {
   const apis = db.prepare(`
     SELECT * FROM stores
@@ -266,11 +265,9 @@ function getNextAvailableAPI(user_id) {
   if (apis.length === 0) return null;
 
   const api = apis[0];
-  const decipher = crypto.createDecipheriv(ALGORITHM, Buffer.from(ENCRYPTION_KEY, 'hex'), Buffer.from(api.access_token_iv, 'hex'));
-  let decrypted = decipher.update(api.access_token_encrypted, 'hex', 'utf8');
-  decrypted += decipher.final('utf8');
+  const decryptedToken = decrypt(api.access_token_encrypted, api.access_token_iv);
   
-  return { ...api, access_token: decrypted };
+  return { ...api, access_token: decryptedToken };
 }
 
 function markAPIUsed(api_id) {
