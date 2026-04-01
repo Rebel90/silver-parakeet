@@ -231,7 +231,7 @@ export default function Dashboard() {
         )}
 
         {/* ─── Log Viewer ─── */}
-        <LogViewer />
+        {user?.role === 'admin' && <LogViewer />}
 
         <Box paddingBlockEnd="800">
           <InlineStack align="center">
