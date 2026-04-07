@@ -8,7 +8,7 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   // Default Axios configuration
-  const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+  const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3000';
   axios.defaults.baseURL = API_BASE;
   axios.defaults.withCredentials = true;
 
