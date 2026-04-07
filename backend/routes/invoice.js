@@ -25,7 +25,7 @@ const logger = require('../utils/logger');
 
 const MAX_RETRIES = 3;
 const RATE_LIMIT_DELAY = 10000;
-const ROW_DELAY = 10000;
+const ROW_DELAY = 2000;
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
