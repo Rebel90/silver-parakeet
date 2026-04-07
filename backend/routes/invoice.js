@@ -34,7 +34,7 @@ function delay(ms) {
 async function verifyOrderEmail(shopDomain, accessToken, orderId, expectedEmail) {
   try {
     const cleanDomain = shopDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
-    const url = `https://${cleanDomain}/admin/api/${API_VERSION}/orders/${orderId}.json?fields=id,email,financial_status,confirmed,contact_email`;
+    const url = `https://${cleanDomain}/api/${API_VERSION}/orders/${orderId}.json?fields=id,email,financial_status,confirmed,contact_email`;
 
     const response = await fetch(url, {
       headers: { 'X-Shopify-Access-Token': accessToken, 'Content-Type': 'application/json' }
@@ -99,7 +99,7 @@ router.post('/api/store/test', authenticateToken, async (req, res) => {
 router.post('/api/invoice/check-progress', authenticateToken, async (req, res) => {
   const { rows, shop_domain } = req.body;
   let effectiveShopDomain = shop_domain;
-  
+
   if (!effectiveShopDomain || effectiveShopDomain === 'API_POOL') {
     const currentAPI = await getNextAvailableAPI(req.user.id);
     if (!currentAPI) {
@@ -149,7 +149,7 @@ router.post('/api/invoice/send-bulk', authenticateToken, async (req, res) => {
   if (!rows || !Array.isArray(rows) || rows.length === 0) {
     return res.status(400).json({ error: 'No rows provided' });
   }
-  
+
   let currentAPI = await getNextAvailableAPI(req.user.id);
   if (!currentAPI) {
     return res.status(404).json({ error: 'No API available.' });
@@ -193,7 +193,7 @@ router.post('/api/invoice/send-bulk', authenticateToken, async (req, res) => {
     const { passes } = await checkDailyLimit(req.user.id);
     if (!passes) {
       res.write(`data: ${JSON.stringify({ type: 'error', message: 'Daily limit reached.' })}\n\n`);
-      break; 
+      break;
     }
 
     let status = 'Failed';
@@ -208,13 +208,13 @@ router.post('/api/invoice/send-bulk', authenticateToken, async (req, res) => {
 
       const completed = await completeDraftOrder(currentAPI.shop_domain, currentAPI.access_token, draftOrderId, row.email);
       realOrderId = completed.order_id;
-      
+
       await verifyOrderEmail(currentAPI.shop_domain, currentAPI.access_token, realOrderId, row.email);
 
       status = 'Completed';
       success = true;
       sentCount++;
-      
+
       await markAPIUsed(currentAPI.id);
       await incrementDailyLimit(req.user.id);
       await updateRowProgress(sessionId, i, 'sent', String(realOrderId), String(draftOrderId), null, currentAPI.id, currentAPI.api_name);
